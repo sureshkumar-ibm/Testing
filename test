@@ -1,26 +1,47 @@
-// --- from getKeyAndChain ---
-PrivateKey key = (PrivateKey) privateKey;                 // Object -> PrivateKey
-
-// Object[] -> List<X509Certificate>; copy element by element so the cast is safe
+// 1. Identity from getKeyAndChain
+PrivateKey key = (PrivateKey) privateKey;
 List<X509Certificate> chain = new ArrayList<>();
 for (Object o : certChain) chain.add((X509Certificate) o);
 
-// leaf = first cert, intermediates = the rest
 X509Identity identity = X509Identity.createWithoutDestroyingKey(
         chain.get(0), key, chain.subList(1, chain.size()));
 
-// --- plugin ---
-RolesAnywherePlugin plugin = RolesAnywherePlugin.builder()
+// 2. One provider
+RolesAnywhereCredentialsProvider provider = RolesAnywhereCredentialsProvider.builder()
         .identityProvider(X509IdentityProvider.ofStatic(identity))
         .trustAnchorArn(trustAnchorArn)
         .profileArn(profileArn)
         .roleArn(roleArn)
-        .roleSessionName("wm-session")      // optional
-        .durationSeconds(3600)              // optional
-        .region(Region.of("us-east-1"))     // optional, inferred from the ARNs
+        .roleSessionName("wm-session")
+        .durationSeconds(3600)
+        .region(Region.of(region))
         .build();
 
-SqsClient sqs = SqsClient.builder()
-        .addPlugin(plugin)
-        .region(Region.of("us-east-1"))
-        .build();
+// 3a. Get the temporary credentials (calls CreateSession)
+AwsSessionCredentials creds = (AwsSessionCredentials) provider.resolveCredentials();
+String accessKey    = creds.accessKeyId();
+String secretKey    = creds.secretAccessKey();
+String sessionToken = creds.sessionToken();
+String expiry       = creds.expirationTime().map(Object::toString).orElse("UNKNOWN");
+
+// 3b. Call SQS using the plugin
+RolesAnywherePlugin plugin = RolesAnywherePlugin.create(provider);
+
+try (SqsClient sqs = SqsClient.builder()
+        .addPlugin(RolesAnywherePlugin.create(provider))
+        .region(Region.of(region))
+        .build()) {
+
+    List<Message> messages = sqs.receiveMessage(r -> r
+            .queueUrl(queueUrl)
+            .maxNumberOfMessages(10)
+            .waitTimeSeconds(10)
+            .visibilityTimeout(30)
+            .messageAttributeNames("All")).messages();
+
+    for (Message m : messages) {
+        System.out.println(m.body());
+        // After you process it successfully:
+        sqs.deleteMessage(d -> d.queueUrl(queueUrl).receiptHandle(m.receiptHandle()));
+    }
+}

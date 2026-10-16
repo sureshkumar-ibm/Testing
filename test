@@ -1,3 +1,31 @@
+// Roles Anywhere plugin
+import software.amazon.rolesanywhere.plugin.RolesAnywhereCredentialsProvider;
+import software.amazon.rolesanywhere.plugin.RolesAnywherePlugin;
+import software.amazon.rolesanywhere.plugin.X509Identity;
+import software.amazon.rolesanywhere.plugin.X509IdentityProvider;
+
+// AWS SDK core
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.regions.Region;
+
+// SQS
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
+
+// Java
+import java.security.PrivateKey;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.List;
+
+
+import com.wm.app.b2b.server.Service;
+import com.wm.data.IData;
+import com.wm.data.IDataCursor;
+import com.wm.data.IDataFactory;
+import com.wm.data.IDataUtil;
+
 // 1. Identity from getKeyAndChain
 PrivateKey key = (PrivateKey) privateKey;
 List<X509Certificate> chain = new ArrayList<>();

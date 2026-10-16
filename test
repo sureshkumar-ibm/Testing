@@ -1,0 +1,26 @@
+// --- from getKeyAndChain ---
+PrivateKey key = (PrivateKey) privateKey;                 // Object -> PrivateKey
+
+// Object[] -> List<X509Certificate>; copy element by element so the cast is safe
+List<X509Certificate> chain = new ArrayList<>();
+for (Object o : certChain) chain.add((X509Certificate) o);
+
+// leaf = first cert, intermediates = the rest
+X509Identity identity = X509Identity.createWithoutDestroyingKey(
+        chain.get(0), key, chain.subList(1, chain.size()));
+
+// --- plugin ---
+RolesAnywherePlugin plugin = RolesAnywherePlugin.builder()
+        .identityProvider(X509IdentityProvider.ofStatic(identity))
+        .trustAnchorArn(trustAnchorArn)
+        .profileArn(profileArn)
+        .roleArn(roleArn)
+        .roleSessionName("wm-session")      // optional
+        .durationSeconds(3600)              // optional
+        .region(Region.of("us-east-1"))     // optional, inferred from the ARNs
+        .build();
+
+SqsClient sqs = SqsClient.builder()
+        .addPlugin(plugin)
+        .region(Region.of("us-east-1"))
+        .build();

@@ -1,0 +1,125 @@
+	IDataCursor pipelineCursor = pipeline.getCursor();
+			String	keystoreAlias = IDataUtil.getString( pipelineCursor, "keystoreAlias" );
+			String	keyAlias = IDataUtil.getString( pipelineCursor, "keyAlias" );
+			String	trustAnchorArn = IDataUtil.getString( pipelineCursor, "trustAnchorArn" );
+			String	profileArn = IDataUtil.getString( pipelineCursor, "profileArn" );
+			String	roleArn = IDataUtil.getString( pipelineCursor, "roleArn" );
+			String	region = IDataUtil.getString( pipelineCursor, "region" );
+			String	queueUrl = IDataUtil.getString( pipelineCursor, "queueUrl" );
+			String	maxMessages = IDataUtil.getString( pipelineCursor, "maxMessages" );
+			String	waitTimeSeconds = IDataUtil.getString( pipelineCursor, "waitTimeSeconds" );
+			String	visibilityTimeout = IDataUtil.getString( pipelineCursor, "visibilityTimeout" );
+			String	deleteAfterRead = IDataUtil.getString( pipelineCursor, "deleteAfterRead" );
+			String	roleSessionName = IDataUtil.getString( pipelineCursor, "roleSessionName" );
+			String	durationSeconds = IDataUtil.getString( pipelineCursor, "durationSeconds" );
+		pipelineCursor.destroy();
+		
+		// input
+		IData input = IDataFactory.create();
+		IDataCursor inputCursor = input.getCursor();
+		IDataUtil.put( inputCursor, "keyStoreAlias", "keyStoreAlias" );
+		IDataUtil.put( inputCursor, "keyAlias", "keyAlias" );
+		inputCursor.destroy();
+		
+		// output
+		IData 	output = IDataFactory.create();
+		try{
+			output = Service.doInvoke( "pub.security.keystore", "getKeyAndChain", input );
+		}catch( Exception e){}
+		IDataCursor outputCursor = output.getCursor();
+			Object	privateKey = IDataUtil.get( outputCursor, "privateKey" );
+			Object[]	certChainObjects = IDataUtil.getObjectArray( outputCursor, "certChain" );
+		outputCursor.destroy();
+		
+		List<X509Certificate> intermediateCerts =
+			    new ArrayList<X509Certificate>();
+		
+			X509Certificate leafCertificate = null;
+		
+			for (int i = 0; i < certChainObjects.length; i++) {
+		
+			    Certificate cert = (Certificate) certChainObjects[i];
+		
+			    if (!(cert instanceof X509Certificate)) {
+			        continue;
+			    }
+		
+			    if (i == 0) {
+			        leafCertificate = (X509Certificate) cert;
+			    } else {
+			        intermediateCerts.add((X509Certificate) cert);
+			    }
+			}
+		
+			if (leafCertificate == null) {
+			    throw new ServiceException(
+			        "Leaf certificate not found in certChain");
+			}
+		
+			
+			X509Identity identity =
+				    X509Identity.createWithoutDestroyingKey(
+				        leafCertificate,
+				        (PrivateKey) privateKey,
+				        intermediateCerts);
+		
+				X509IdentityProvider identityProvider =
+				    X509IdentityProvider.ofStatic(identity);
+				
+			    RolesAnywherePlugin plugin =
+			            RolesAnywherePlugin.builder()
+			                .identityProvider(identityProvider)
+			                .trustAnchorArn(trustAnchorArn)
+			                .profileArn(profileArn)
+			                .roleArn(roleArn)
+			                .roleSessionName(roleSessionName)
+			                .durationSeconds(Integer.parseInt(durationSeconds))
+			                .region(Region.of(region))
+			                .build();		
+			    SqsClient sqsClient = null;
+			    sqsClient =
+			            SqsClient.builder()
+			                .region(Region.of(region))
+			                .addPlugin(plugin)
+			                .build();
+			    ReceiveMessageRequest.Builder receiveRequestBuilder =
+			            ReceiveMessageRequest.builder()
+			                .queueUrl(queueUrl)
+			                .maxNumberOfMessages(Integer.parseInt(maxMessages))
+			                .waitTimeSeconds(Integer.parseInt(waitTimeSeconds))
+			                .messageAttributeNames("All")
+			                .attributeNamesWithStrings("All");
+		
+			        if (visibilityTimeout != null) {
+			            receiveRequestBuilder.visibilityTimeout(
+			                visibilityTimeout.intValue()
+			            );
+			        }
+		
+			        ReceiveMessageResponse receiveResponse =
+			            sqsClient.receiveMessage(
+			                receiveRequestBuilder.build()
+			            );
+		// pipeline
+		IDataCursor pipelineCursor_1 = pipeline.getCursor();
+		IDataUtil.put( pipelineCursor_1, "success", "success" );
+		IDataUtil.put( pipelineCursor_1, "messageCount", "messageCount" );
+		String[]	messageIds = new String[1];
+		messageIds[0] = "messageIds";
+		IDataUtil.put( pipelineCursor_1, "messageIds", messageIds );
+		String[]	messageBodies = new String[1];
+		messageBodies[0] = "messageBodies";
+		IDataUtil.put( pipelineCursor_1, "messageBodies", messageBodies );
+		String[]	receiptHandles = new String[1];
+		receiptHandles[0] = "receiptHandles";
+		IDataUtil.put( pipelineCursor_1, "receiptHandles", receiptHandles );
+		
+		// messageAttributes
+		IData[]	messageAttributes = new IData[1];
+		messageAttributes[0] = IDataFactory.create();
+		IDataUtil.put( pipelineCursor_1, "messageAttributes", messageAttributes );
+		String[]	deletedMessageIds = new String[1];
+		deletedMessageIds[0] = "deletedMessageIds";
+		IDataUtil.put( pipelineCursor_1, "deletedMessageIds", deletedMessageIds );
+		IDataUtil.put( pipelineCursor_1, "errorMessage", "errorMessage" );
+		pipelineCursor_1.destroy();

@@ -1,0 +1,185 @@
+import com.wm.data.IData;
+import com.wm.data.IDataCursor;
+import com.wm.data.IDataFactory;
+import com.wm.data.IDataUtil;
+import com.wm.app.b2b.server.ServiceException;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageResponse;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
+import software.amazon.awssdk.services.sqs.model.SqsException;
+
+// --- Shared Helper to build SQS Client using EC2 Instance Profile ---
+public static SqsClient createSqsClient(String regionStr) {
+    Region region = (regionStr != null && !regionStr.trim().isEmpty()) 
+                    ? Region.of(regionStr.trim()) 
+                    : Region.US_EAST_1;
+
+    return SqsClient.builder()
+            .region(region)
+            .credentialsProvider(InstanceProfileCredentialsProvider.create())
+            .build();
+}
+
+//receiveMessages
+
+Pipeline Signature
+Input Parameters:
+queueUrl (String, required): SQS Queue URL (e.g. https://sqs.us-east-1.amazonaws.com/123456789012/my-queue).
+region (String, required): AWS Region name (e.g. us-east-1).
+maxNumberOfMessages (String / Integer, optional): Max messages to read (1–10, default 1).
+waitTimeSeconds (String / Integer, optional): Wait time for long polling in seconds (0–20, default 10).
+visibilityTimeout (String / Integer, optional): Visibility timeout in seconds (default queue setting if omitted).
+Output Parameters:
+messages (Document List / IData[]):
+messageId (String)
+receiptHandle (String) (Required to delete the message later)
+body (String)
+md5OfBody (String)
+messageCount (String): Number of messages received.
+
+
+public static final void receiveMessages(IData pipeline) throws ServiceException {
+    IDataCursor pipelineCursor = pipeline.getCursor();
+    String queueUrl = IDataUtil.getString(pipelineCursor, "queueUrl");
+    String region = IDataUtil.getString(pipelineCursor, "region");
+    String maxMessagesStr = IDataUtil.getString(pipelineCursor, "maxNumberOfMessages");
+    String waitTimeStr = IDataUtil.getString(pipelineCursor, "waitTimeSeconds");
+    String visibilityTimeoutStr = IDataUtil.getString(pipelineCursor, "visibilityTimeout");
+    pipelineCursor.destroy();
+
+    if (queueUrl == null || queueUrl.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'queueUrl'");
+    }
+    if (region == null || region.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'region'");
+    }
+
+    int maxNumberOfMessages = 1;
+    if (maxMessagesStr != null && !maxMessagesStr.trim().isEmpty()) {
+        try {
+            maxNumberOfMessages = Math.min(10, Math.max(1, Integer.parseInt(maxMessagesStr.trim())));
+        } catch (NumberFormatException ignored) {}
+    }
+
+    int waitTimeSeconds = 10;
+    if (waitTimeStr != null && !waitTimeStr.trim().isEmpty()) {
+        try {
+            waitTimeSeconds = Math.min(20, Math.max(0, Integer.parseInt(waitTimeStr.trim())));
+        } catch (NumberFormatException ignored) {}
+    }
+
+    try (SqsClient sqsClient = createSqsClient(region)) {
+        ReceiveMessageRequest.Builder requestBuilder = ReceiveMessageRequest.builder()
+                .queueUrl(queueUrl.trim())
+                .maxNumberOfMessages(maxNumberOfMessages)
+                .waitTimeSeconds(waitTimeSeconds);
+
+        if (visibilityTimeoutStr != null && !visibilityTimeoutStr.trim().isEmpty()) {
+            try {
+                requestBuilder.visibilityTimeout(Integer.parseInt(visibilityTimeoutStr.trim()));
+            } catch (NumberFormatException ignored) {}
+        }
+
+        ReceiveMessageResponse response = sqsClient.receiveMessage(requestBuilder.build());
+        List<Message> sqsMessages = response.messages();
+
+        List<IData> messageList = new ArrayList<>();
+        if (sqsMessages != null && !sqsMessages.isEmpty()) {
+            for (Message msg : sqsMessages) {
+                IData msgDoc = IDataFactory.create();
+                IDataCursor msgCursor = msgDoc.getCursor();
+                IDataUtil.put(msgCursor, "messageId", msg.messageId());
+                IDataUtil.put(msgCursor, "receiptHandle", msg.receiptHandle());
+                IDataUtil.put(msgCursor, "body", msg.body());
+                IDataUtil.put(msgCursor, "md5OfBody", msg.md5OfBody());
+                msgCursor.destroy();
+
+                messageList.add(msgDoc);
+            }
+        }
+
+        IDataCursor outputCursor = pipeline.getCursor();
+        IDataUtil.put(outputCursor, "messages", messageList.toArray(new IData[0]));
+        IDataUtil.put(outputCursor, "messageCount", String.valueOf(messageList.size()));
+        outputCursor.destroy();
+
+    } catch (SqsException e) {
+        throw new ServiceException("AWS SQS error receiving message: " + e.awsErrorDetails().errorMessage(), e);
+    } catch (Exception e) {
+        throw new ServiceException("Failed to receive SQS messages: " + e.getMessage(), e);
+    }
+}
+
+Pipeline Signature
+Input Parameters:
+queueUrl (String, required): SQS Queue URL (e.g. https://sqs.us-east-1.amazonaws.com/123456789012/my-queue).
+region (String, required): AWS Region name (e.g. us-east-1).
+maxNumberOfMessages (String / Integer, optional): Max messages to read (1–10, default 1).
+waitTimeSeconds (String / Integer, optional): Wait time for long polling in seconds (0–20, default 10).
+visibilityTimeout (String / Integer, optional): Visibility timeout in seconds (default queue setting if omitted).
+Output Parameters:
+messages (Document List / IData[]):
+messageId (String)
+receiptHandle (String) (Required to delete the message later)
+body (String)
+md5OfBody (String)
+messageCount (String): Number of messages received.
+
+
+public static final void deleteMessage(IData pipeline) throws ServiceException {
+    IDataCursor pipelineCursor = pipeline.getCursor();
+    String queueUrl = IDataUtil.getString(pipelineCursor, "queueUrl");
+    String region = IDataUtil.getString(pipelineCursor, "region");
+    String receiptHandle = IDataUtil.getString(pipelineCursor, "receiptHandle");
+    pipelineCursor.destroy();
+
+    if (queueUrl == null || queueUrl.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'queueUrl'");
+    }
+    if (region == null || region.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'region'");
+    }
+    if (receiptHandle == null || receiptHandle.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'receiptHandle'");
+    }
+
+    try (SqsClient sqsClient = createSqsClient(region)) {
+        DeleteMessageRequest deleteRequest = DeleteMessageRequest.builder()
+                .queueUrl(queueUrl.trim())
+                .receiptHandle(receiptHandle.trim())
+                .build();
+
+        sqsClient.deleteMessage(deleteRequest);
+
+        IDataCursor outputCursor = pipeline.getCursor();
+        IDataUtil.put(outputCursor, "success", "true");
+        outputCursor.destroy();
+
+    } catch (SqsException e) {
+        throw new ServiceException("AWS SQS error deleting message: " + e.awsErrorDetails().errorMessage(), e);
+    } catch (Exception e) {
+        throw new ServiceException("Failed to delete SQS message: " + e.getMessage(), e);
+    }
+}
+
+
+Typical Flow Pattern in webMethods Flow Service
+Create a Flow service that coordinates read, process, and delete:
+
+1. INVOKE receiveMessages (queueUrl, region, maxNumberOfMessages="1", waitTimeSeconds="20")
+2. BRANCH on '/messageCount'
+   |- '0': EXIT (No messages available)
+   |- $default:
+        LOOP over '/messages'
+          |- Map message/body to target format
+          |- Perform business logic (e.g., database insert, SAP RFC, etc.)
+          |- INVOKE deleteMessage (queueUrl, region, receiptHandle=messages/receiptHandle)

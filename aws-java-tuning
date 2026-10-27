@@ -1,0 +1,193 @@
+// Shared Source Code
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import java.time.Duration;
+
+// Cache clients per AWS Region to support singletons across repeated runs
+private static final Map<String, SqsClient> CLIENT_CACHE = new ConcurrentHashMap<>();
+
+/**
+ * Returns a thread-safe cached SqsClient for the specified region.
+ * Uses lightweight UrlConnectionHttpClient to avoid Netty/Apache thread pool overhead.
+ */
+public static SqsClient getSqsClient(String regionStr) {
+    String regionKey = (regionStr != null && !regionStr.trim().isEmpty()) 
+                       ? regionStr.trim().toLowerCase() 
+                       : "us-east-1";
+
+    return CLIENT_CACHE.computeIfAbsent(regionKey, r -> {
+        Region region = Region.of(r);
+        return SqsClient.builder()
+                .region(region)
+                // InstanceProfileCredentialsProvider manages & caches IMDSv2 tokens automatically
+                .credentialsProvider(InstanceProfileCredentialsProvider.create())
+                // Lightweight blocking HTTP client ideal for low-to-medium scheduled invocations
+                .httpClientBuilder(
+                    UrlConnectionHttpClient.builder()
+                        .socketTimeout(Duration.ofSeconds(30))
+                        .connectionTimeout(Duration.ofSeconds(10))
+                )
+                .build();
+    });
+}
+
+/**
+ * Invoked on package shutdown/reload to close all connections and thread pools cleanly.
+ */
+public static synchronized void closeAllClients() {
+    for (Map.Entry<String, SqsClient> entry : CLIENT_CACHE.entrySet()) {
+        try {
+            if (entry.getValue() != null) {
+                entry.getValue().close();
+            }
+        } catch (Exception ignored) {
+            // Ignore during shutdown
+        }
+    }
+    CLIENT_CACHE.clear();
+}
+
+// Package Shutdown Service:
+public static final void shutdown(IData pipeline) throws ServiceException {
+    closeAllClients();
+}
+
+// receiveMessages
+
+public static final void receiveMessages(IData pipeline) throws ServiceException {
+    IDataCursor pipelineCursor = pipeline.getCursor();
+    String queueUrl;
+    String region;
+    String maxMessagesStr;
+    String waitTimeStr;
+    String visibilityTimeoutStr;
+
+    try {
+        queueUrl = IDataUtil.getString(pipelineCursor, "queueUrl");
+        region = IDataUtil.getString(pipelineCursor, "region");
+        maxMessagesStr = IDataUtil.getString(pipelineCursor, "maxNumberOfMessages");
+        waitTimeStr = IDataUtil.getString(pipelineCursor, "waitTimeSeconds");
+        visibilityTimeoutStr = IDataUtil.getString(pipelineCursor, "visibilityTimeout");
+    } finally {
+        pipelineCursor.destroy(); // Always destroy cursor in finally block
+    }
+
+    if (queueUrl == null || queueUrl.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'queueUrl'");
+    }
+
+    int maxNumberOfMessages = 1;
+    if (maxMessagesStr != null && !maxMessagesStr.trim().isEmpty()) {
+        try {
+            maxNumberOfMessages = Math.min(10, Math.max(1, Integer.parseInt(maxMessagesStr.trim())));
+        } catch (NumberFormatException ignored) {}
+    }
+
+    int waitTimeSeconds = 10;
+    if (waitTimeStr != null && !waitTimeStr.trim().isEmpty()) {
+        try {
+            waitTimeSeconds = Math.min(20, Math.max(0, Integer.parseInt(waitTimeStr.trim())));
+        } catch (NumberFormatException ignored) {}
+    }
+
+    try {
+        // Retrieve cached client (no creation/destruction cost per run)
+        SqsClient sqsClient = getSqsClient(region);
+
+        ReceiveMessageRequest.Builder requestBuilder = ReceiveMessageRequest.builder()
+                .queueUrl(queueUrl.trim())
+                .maxNumberOfMessages(maxNumberOfMessages)
+                .waitTimeSeconds(waitTimeSeconds);
+
+        if (visibilityTimeoutStr != null && !visibilityTimeoutStr.trim().isEmpty()) {
+            try {
+                requestBuilder.visibilityTimeout(Integer.parseInt(visibilityTimeoutStr.trim()));
+            } catch (NumberFormatException ignored) {}
+        }
+
+        ReceiveMessageResponse response = sqsClient.receiveMessage(requestBuilder.build());
+        List<Message> sqsMessages = response.messages();
+
+        List<IData> messageList = new ArrayList<>();
+        if (sqsMessages != null && !sqsMessages.isEmpty()) {
+            for (Message msg : sqsMessages) {
+                IData msgDoc = IDataFactory.create();
+                IDataCursor msgCursor = msgDoc.getCursor();
+                try {
+                    IDataUtil.put(msgCursor, "messageId", msg.messageId());
+                    IDataUtil.put(msgCursor, "receiptHandle", msg.receiptHandle());
+                    IDataUtil.put(msgCursor, "body", msg.body());
+                    IDataUtil.put(msgCursor, "md5OfBody", msg.md5OfBody());
+                } finally {
+                    msgCursor.destroy();
+                }
+                messageList.add(msgDoc);
+            }
+        }
+
+        IDataCursor outputCursor = pipeline.getCursor();
+        try {
+            IDataUtil.put(outputCursor, "messages", messageList.toArray(new IData[0]));
+            IDataUtil.put(outputCursor, "messageCount", String.valueOf(messageList.size()));
+        } finally {
+            outputCursor.destroy();
+        }
+
+    } catch (SqsException e) {
+        throw new ServiceException("AWS SQS error receiving message: " + e.awsErrorDetails().errorMessage(), e);
+    } catch (Exception e) {
+        throw new ServiceException("Failed to receive SQS messages: " + e.getMessage(), e);
+    }
+}
+
+//deleteMessage
+public static final void deleteMessage(IData pipeline) throws ServiceException {
+    IDataCursor pipelineCursor = pipeline.getCursor();
+    String queueUrl;
+    String region;
+    String receiptHandle;
+
+    try {
+        queueUrl = IDataUtil.getString(pipelineCursor, "queueUrl");
+        region = IDataUtil.getString(pipelineCursor, "region");
+        receiptHandle = IDataUtil.getString(pipelineCursor, "receiptHandle");
+    } finally {
+        pipelineCursor.destroy();
+    }
+
+    if (queueUrl == null || queueUrl.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'queueUrl'");
+    }
+    if (receiptHandle == null || receiptHandle.trim().isEmpty()) {
+        throw new ServiceException("Missing required input parameter: 'receiptHandle'");
+    }
+
+    try {
+        SqsClient sqsClient = getSqsClient(region);
+
+        DeleteMessageRequest deleteRequest = DeleteMessageRequest.builder()
+                .queueUrl(queueUrl.trim())
+                .receiptHandle(receiptHandle.trim())
+                .build();
+
+        sqsClient.deleteMessage(deleteRequest);
+
+        IDataCursor outputCursor = pipeline.getCursor();
+        try {
+            IDataUtil.put(outputCursor, "success", "true");
+        } finally {
+            outputCursor.destroy();
+        }
+
+    } catch (SqsException e) {
+        throw new ServiceException("AWS SQS error deleting message: " + e.awsErrorDetails().errorMessage(), e);
+    } catch (Exception e) {
+        throw new ServiceException("Failed to delete SQS message: " + e.getMessage(), e);
+    }
+}
+
